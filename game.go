@@ -7,7 +7,11 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -25,6 +29,7 @@ var (
 	food       Point
 	gameOver   bool
 	inputQueue = make(chan string)
+	oldState   *term.State
 )
 
 func clearScreen() {
@@ -81,8 +86,20 @@ func move() {
 func inputListener() {
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		input, _ := reader.ReadString('\n')
-		inputQueue <- input
+		input, err := reader.ReadByte()
+		if err != nil {
+			log.Printf("Failed to read input: %v", err)
+		}
+		if input == '\x1b' {
+			// Potential escape sequence
+			seq := make([]byte, 2)
+			_, err := reader.Read(seq)
+			if err == nil {
+				inputQueue <- string([]byte{input, seq[0], seq[1]})
+			}
+		} else {
+			inputQueue <- string(input)
+		}
 	}
 }
 
@@ -91,16 +108,16 @@ func processInput() {
 	case input := <-inputQueue:
 		switch input {
 		// Up
-		case "w\n", "k\n", "\x1b[A":
+		case "w", "k", "\x1b[A":
 			direction = Point{0, -1}
 		// Down
-		case "s\n", "j\n", "\x1b[B":
+		case "s", "j", "\x1b[B":
 			direction = Point{0, 1}
 		// Left
-		case "a\n", "h\n", "\x1b[D":
+		case "a", "h", "\x1b[D":
 			direction = Point{-1, 0}
 		// Right
-		case "d\n", "l\n", "\x1b[C":
+		case "d", "l", "\x1b[C":
 			direction = Point{1, 0}
 		}
 	default:
@@ -108,13 +125,30 @@ func processInput() {
 }
 
 func main() {
-	// init
+	// Initialize random seed
 	src := rand.NewSource(time.Now().UnixNano())
 	r := rand.New(src)
 	// Start snake in the center
 	snake = []Point{{width / 2, height / 2}}
 	direction = Point{0, 1}
 	food = Point{r.Intn(width), r.Intn(height)}
+
+	// Set terminal to raw mode
+	var err error
+	oldState, err = term.MakeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		log.Fatalf("Failed to set terminal to raw mode: %v", err)
+	}
+	defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+	// Handle SIGINT to restore terminal mode
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		term.Restore(int(os.Stdin.Fd()), oldState)
+		os.Exit(0)
+	}()
 
 	go inputListener()
 	ticker := time.NewTicker(500 * time.Millisecond)
